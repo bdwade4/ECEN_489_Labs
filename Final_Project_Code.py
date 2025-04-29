@@ -7,7 +7,9 @@ import matplotlib.pyplot as plt
 from scipy.signal import freqz, butter
 import scipy.fft as fft
 from scipy.signal.windows import blackman, hann, hamming
-from scipy.optimize import minimize
+
+# Import ML Libraries
+from sklearn.ensemble import RandomForestRegressor
 
 
 ################### Sampling ADC  ############################
@@ -15,12 +17,12 @@ from scipy.optimize import minimize
 # Sample the signal
 
 # Converts CT to DT signals: 
-DFT_Len = 100 # Choose DFT Length
+DFT_Len = 10000 # Choose DFT Length
 variance = (0.5)**2
 bits = 14
 Vfs = 1
 
-mismatch = 0.25 # Chosen SAR Capacitor mismatch
+mismatch = 0.5 # Chosen SAR Capacitor mismatch
 
 # Ideal quantization
 def quantize(value):
@@ -31,7 +33,7 @@ def quantize(value):
     value = value / (2**(bits-1))# Decimate back to true value of quantized signal
     return value
 
-# Converts listed binary to conventional value
+# Converts listed binary to conventional value (ChatGPT Assisted)
 def binary_int(binary_list):
     binary_str = ''.join(str(bit) for bit in binary_list)
     decimal = int(binary_str, 2)
@@ -94,7 +96,7 @@ def get_signal(t,opt): ## Primary frequency being sampled
     for time in t:
         noise = (-noise_amp/2) + (noise_amp * 2 * np.random.rand())
         #noise = np.random.normal(0,np.sqrt(variance)) # Gaussian
-        value = 0.2*(np.sin(2 * np.pi * 2*10e6 * time)) + noise
+        value = 1*(np.sin(2 * np.pi * 0.7*10e6 * time)) + noise
         # Round to quantized value (-1V to 1V Full scale range)
         value = binary_quantize(value,opt)
         # Append and return
@@ -122,32 +124,6 @@ plt.title("Continuous to Discrete Signal Transformation")
 plt.show()
 '''
 
-################### Find the factors to minimize error (ML) #################
-def ml_model(list_a, list_b, list_c): # Generates quadratic adjustments for each ADC
-    a = np.array(list_a)
-    b = np.array(list_b)
-    c = np.array(list_c)
-
-    # Fit x * a + b ≈ c
-    def loss_a(params):
-        scale, intercept = params
-        return np.sum((scale * a + intercept - c) ** 2)
-
-    # Fit y * b + c ≈ c
-    def loss_b(params):
-        scale, intercept = params
-        return np.sum((scale * b + intercept - c) ** 2)
-
-    res_a = minimize(loss_a, x0=[1, 0])
-    res_b = minimize(loss_b, x0=[1, 0])
-
-    x_scale, x_intercept = res_a.x
-    y_scale, y_intercept = res_b.x
-    
-    a_coeffs = [x_scale,x_intercept]
-    b_coeffs = [y_scale,y_intercept]
-
-    return a_coeffs, b_coeffs
 
 
 ################### Combining logic for the two ADCs   ############################
@@ -173,8 +149,10 @@ def combine(x_ADC1, x_ADC2, plot):
 
 
 ################### Compute and Plot Fourier Analysis  ############################
-def eval_fourier(x_out,plot): # Evaluates Fourier Transform
+fourier_len = 150 # lets me train ML model while not graphing all data
+def eval_fourier(x_out,plot,choose): # Evaluates Fourier Transform
     # Compute fourier signals
+    x_out = x_out[:fourier_len]
     fourier = fft.fft(x_out)
     frequencies = fft.fftfreq(len(x_out), Ts)  # Frequency bins
     
@@ -185,14 +163,18 @@ def eval_fourier(x_out,plot): # Evaluates Fourier Transform
         value = abs(freq)
         mid.append(value)
     
-    second_largest = sorted(set(mid))[-2]
+    if (choose == 0):
+        choice = max(mid)
+    else: 
+        choice = sorted(set(mid))[-2]
+    
     # Normalize in dB to strongest signal 
     for val in mid:
-        value = 10 * np.log10(val / abs(max(mid))) #for true normalizeation, den = abs(max(mid))
+        value = 10 * np.log10(val / abs(choice)) #for true normalizeation, den = abs(max(mid))
         normalized_fourier.append(value)
     
     # Calculate SNR
-    SNR = np.average(normalized_fourier[:((frequencies.size//2) - 30)])
+    SNR = np.average(normalized_fourier[((frequencies.size//2)):])
     #print("SNR: ", SNR)
     
     if (plot == True):
@@ -209,65 +191,83 @@ def eval_fourier(x_out,plot): # Evaluates Fourier Transform
         
 ################### Call Functions (Machine Learning)  ############################
 
-def modify_from_ml(ADC1,ADC2):
-    a1 = -0.044299053541603683 - 0.3275529758295806 + 0.11962223568095572 + 0.195108607639702
-    a2 = 0.004874685132819728 + 0.001569162854879364 - 0.0016276687488099345 - 0.0011876487619025908
-    b1 = -0.056391877729202185 - 0.257843997922653 + 0.11961568774286199 + 0.22409004144965178
-    b2 = 0.004641050954413969 + 0.001234361316654111 - 0.0017446578640630478 - 0.0013945355480219448
-    print()
-    print("A1: ", a1)
-    print("A2: ", a2)
-    print("B1: ", b1)
-    print("B2: ", b2)
+#Note: This is the only part of this project that primarily uses ChatGPT
+def ML_Forest(ADC1,ADC2,err,out):
+    # Intiialize the inputs 
+    list1 = list(ADC1)
+    list2 = list(ADC2)
+    error = list(err)
+    goal = list(out)
     
+    # Manual Trimming of high error values
+    i = 0
+    for x in range(len(error)): 
+        if (error[i] > (0.02*Vfs)):
+            del error[i]
+            del list1[i]
+            del list2[i]
+            del goal[i]
+            i = i - 1 
+        i = i + 1
+
+
+
+
+    # Stack inputs
+    x = np.column_stack((list1, list2))  # Shape (N, 2)
+
+    # set the target output as the sum of the two - this should reduce the error
+        # The interpolation should reduce the errors
+    y = goal
+
+    # Define the Random Forest Regressor
+    model = RandomForestRegressor(
+        n_estimators=500,        # Number of trees
+        max_depth=None,          # Let trees grow until all leaves are pure
+        random_state=250          # For reproducibility
+    )
+
+    # Optional: sample weights based on error
+    sample_weights = [(1 / (20*x + 1)) for x in error]  # Inverse: smaller error = higher importance
+
+    # Train the model
+    model.fit(x, y, sample_weight=sample_weights)
+
+    # Predict
+    stacked = np.column_stack((ADC1, ADC2))
+    predicted_output = model.predict(stacked)
+
+    return predicted_output
     
-    a = [a1 * x + a2 for x in ADC1]
-    b = [b1 * x + b2 for x in ADC2]
-    return a,b
+
+############################# Final Combinations and Untilization ###############################
 
 # Returns a single SNR value from a trial
 def run_cycle():
+    # Set mismatch to 0 for no error
     x_ADC1 = get_signal(t_disc,1) # Use mismatch 1
     x_ADC2 = get_signal(t_disc,2) # Use mismatch 2
     
-    # This enables/disables the modification of the function from previoys iterations of the ML model
-    #x_ADC1,x_ADC2 = modify_from_ml(x_ADC1,x_ADC2) # Modify ML
-    
-
     out, err = combine(x_ADC1,x_ADC2,False)
     
-    x,y = ml_model(x_ADC1, x_ADC2, err) # Machine learning iterations
+    # calls the ML function and returns the revised output from the random forest 
+    revised = ML_Forest(x_ADC1,x_ADC2,err,out)
     
-    '''
-    print("X:", x)
-    print("Y: ", y)
-    print()
-    '''
+    snr = eval_fourier(out, False, 0) #1 is used if it is suspected that the DC value may be higher than the signal
+    snr_new = eval_fourier(revised, False, 0)
+    return snr,snr_new
     
-    snr = eval_fourier(out, False)
-    return snr,x,y
-    
-total = []
-x_total = []
-y_total = []
-for i in range(100):
-    snr,x,y = run_cycle()
-    total.append(snr)
-    x_total.append(x)
-    y_total.append(y)
-    
-# Average factors of correction
-x_total = np.array(x_total)
-x = x_total.T
-y_total = np.array(y_total)
-y = y_total.T
+total_snr = []
+total_snr_new = []
+for i in range(35):
+    snr,snr_new = run_cycle()
+    total_snr.append(snr)
+    if (snr_new > -150): #Cuts out infinite values (error)
+        total_snr_new.append(snr_new)
 
 print()
-print(np.average(total))
-print("ADC1: ",np.average(x[0]),"X +",np.average(x[1]))
-print("ADC2: ",np.average(y[0]),"Y +",np.average(y[1]))
-
-
+print("Old SNR: ", np.average(total_snr))
+print("Revised SNR: ", np.average(total_snr_new))
 
 
 
